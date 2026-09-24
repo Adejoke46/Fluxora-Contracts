@@ -574,6 +574,100 @@ variants above are the complete set it can return.
 
 **Events.** Exactly one `delegate_revoked` event on success, including the
 idempotent no-op case: topics `stream_id`, `grantor`, `delegate`; no payload.
+#### `create_stream` — detailed reference
+
+Create a payment stream and transfer `deposit` tokens from `sender` into the contract's pooled balance. Returns the new stream id (monotonic, never reused).
+
+**Signature:**
+```rust
+fn create_stream(
+    env: Env,
+    sender: Address,
+    recipient: Address,
+    token: Address,
+    deposit: i128,
+    start_time: u64,
+    end_time: u64,
+    cliff_time: u64,
+    cancellable: bool,
+    pausable: bool,
+    transferable: bool,
+) -> Result<u64, Error>
+```
+
+**Authorization:** Requires `sender.require_auth()`. The sender's authorization on this invocation covers the nested token transfer; no prior token approval is needed.
+
+**Parameters:**
+
+| parameter | type | description |
+|---|---|---|
+| `sender` | `Address` | Funding party. Must authorize the call. |
+| `recipient` | `Address` | Receiving party. Must differ from `sender`. |
+| `token` | `Address` | Token contract address (SEP-41). Per-stream, not contract-wide. |
+| `deposit` | `i128` | Initial amount to lock, in the token's smallest unit. Must be positive and satisfy rate constraints. |
+| `start_time` | `u64` | Accrual begins (unix seconds). May be past (backdated vesting), present, or future (scheduled stream). |
+| `end_time` | `u64` | Accrual ends (unix seconds). Must be strictly greater than `start_time`. |
+| `cliff_time` | `u64` | Payout gate (unix seconds). Must be in `[start_time, end_time]`. Set equal to `start_time` for no cliff. **Gates payout, does not delay accrual** — at the cliff instant the recipient becomes entitled to everything accrued since `start_time`. |
+| `cancellable` | `bool` | Whether sender may cancel. Immutable after creation. |
+| `pausable` | `bool` | Whether sender may pause accrual. Immutable after creation. |
+| `transferable` | `bool` | Whether recipient may reassign the stream. Immutable after creation. |
+
+**Valid Ranges and Constraints:**
+
+* **Time Range:** `end_time > start_time` (strictly greater). Duration must be at least 1 second. Zero-duration streams are rejected with `InvalidTimeRange`, not treated as "already vested".
+* **Cliff:** `cliff_time` must satisfy `start_time ≤ cliff_time ≤ end_time`. Both boundary values are legal: `cliff_time == start_time` means no cliff, `cliff_time == end_time` means a single lump-sum payout at maturity.
+* **Deposit:** Must be positive (`deposit > 0`).
+* **Rate Floor:** `deposit ≥ duration_in_seconds`, ensuring the per-second rate does not truncate to zero. For example, a one-year stream requires at least 31,536,000 stroops (~3.16 USDC with 7 decimals).
+* **Overflow Guard:** `deposit × duration` must fit in `i128`. This check at creation proves all future accrual multiplications cannot overflow.
+* **Self-Stream:** `sender ≠ recipient`.
+* **Clock Skew:** No validation limit on past or future timestamps. Backdated streams (past `start_time`) vest immediately for the elapsed portion. Scheduled streams (future `start_time`) accrue nothing until the start instant. Streams extending beyond the network's `max_entry_ttl` are funded to the horizon at creation; the permissionless `extend_stream_ttl` keeper path covers the remainder.
+
+**Errors:**
+
+All validation errors are checked **before** the token transfer. A rejected creation consumes no stream id, increments no counter, pulls no deposit, and leaves no partial state.
+
+| error | condition |
+|---|---|
+| `SelfStream` (6) | `sender == recipient` |
+| `InvalidDeposit` (4) | `deposit ≤ 0` |
+| `InvalidTimeRange` (2) | `end_time ≤ start_time` (zero or negative duration) |
+| `InvalidCliff` (3) | `cliff_time < start_time` or `cliff_time > end_time` |
+| `DepositRateTooLow` (5) | `deposit < (end_time - start_time)`, causing per-second rate to truncate to zero |
+| `Overflow` (22) | `deposit × (end_time - start_time)` does not fit in `i128` |
+| `StreamIdExhausted` (24) | The stream-id counter has reached `u64::MAX`; no further ids can be allocated. Terminal for new creations. |
+| `TokenTransferFailed` (25) | Token contract rejected the transfer (insufficient sender balance, authorization refused, or token's own rules). The token's internal error discriminant is intentionally discarded; see the root diagnostic in the transaction's `diagnosticEvents`. |
+| `TokenMissing` (26) | The `token` address has no deployed contract (host `Abort` / trap). |
+
+**Events:**
+
+On success, emits `stream_created` with topics `[stream_id, sender, recipient]` and payload carrying the complete initial state: `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable`. This is the canonical event for indexer discovery.
+
+**Atomicity:**
+
+Creation is transactional. The stream-id counter and count are advanced only after all validation and the token transfer succeed. A failed creation leaves the id space contiguous with no gaps, consumes no tokens, and emits no event.
+
+**Special Cases:**
+
+* **Backdated Start** (`start_time < now`): Legitimate for hire-date or grant-award vesting. The elapsed portion vests immediately and is withdrawable on the next ledger.
+* **Future Start** (`start_time > now`): Scheduled stream. The deposit is escrowed; accrual begins at `start_time`. Nothing vests or is withdrawable before then.
+* **Fully Elapsed Schedule** (`end_time ≤ now`): Accepted. Reads as fully vested immediately. The entry receives the minimum retention TTL floor.
+* **No Cliff** (`cliff_time == start_time`): Standard continuous vesting with no payout gate.
+* **Cliff at Maturity** (`cliff_time == end_time`): Single lump-sum payout when the stream completes.
+
+**Example:** A 100-day stream of 1,000 USDC (7 decimals = 10,000,000 stroops per USDC) created with a 10-day cliff:
+
+```
+deposit:     10_000_000_000 stroops
+duration:    8_640_000 seconds (100 days)
+rate:        1_157 stroops/second (truncating division)
+start_time:  1609459200 (2021-01-01 00:00:00 UTC, example)
+end_time:    1618099200 (2021-04-11 00:00:00 UTC)
+cliff_time:  1610323200 (2021-01-11 00:00:00 UTC)
+```
+
+At day 9: vested = 900 USDC, but withdrawable = 0 (pre-cliff).  
+At day 11: vested = 1,100 USDC, withdrawable = 1,100 USDC (cliff passed, all accrued funds unlocked).  
+At day 100: vested = 10,000 USDC, withdrawable = 10,000 USDC (fully matured).
 
 ### Views — read-only, no TTL side effects
 
