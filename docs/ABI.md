@@ -333,6 +333,29 @@ Either the stream's `sender` or its `recipient` may revoke, and either party may
 revoke a grant the **other** party issued: the grant key is per
 `(stream_id, delegate)`, not per issuer. The delegate cannot revoke its own
 grant, and an address that is neither party cannot revoke at all.
+| `transfer_recipient(stream_id, new_recipient)` | sender | — |
+
+`withdraw` with `amount = None` draws the full available balance.
+
+#### `transfer_recipient(stream_id, new_recipient)` — reassign future payouts
+
+`transfer_recipient` replaces `Stream.recipient` with `new_recipient`. Accrual
+schedule, `deposited`, `withdrawn`, status, and token are unchanged: any balance
+the old recipient had already accrued but not withdrawn **moves with the
+stream** to the new recipient. Integrators should withdraw before transferring
+if they need to settle the old payee's claim first.
+
+Transfer is allowed at the cliff and end timestamps; the new recipient receives
+whatever is withdrawable at those boundaries. A `Cancelled` stream may still be
+transferred while it has an unwithdrawn residual (`withdrawn < deposited`). A
+`Depleted` stream, or any stream whose deposit is fully drawn, cannot be
+transferred.
+
+Available only when the stream was created with `transferable == true`. A
+compliance-bound sender can pin the payee at creation by passing `false`.
+
+No tokens move in this call: there is no token sub-invocation. The recipient
+change is a single storage write plus one event.
 
 **Parameters.**
 
@@ -359,6 +382,16 @@ and must sign (`grantor.require_auth()`). The delegate neither consents nor can
 block the revocation, and there is no admin key. The party check runs before the
 auth check, so an address that is neither party returns `Unauthorized` whether
 or not it signed.
+| `stream_id` | `u64` | Id of an existing stream that still has an unwithdrawn claim (`withdrawn < deposited`) and is not `Depleted`. Ids are monotonic in `0..stream_count()`; an id that was never issued, or whose entry has been archived, fails with `StreamNotFound`. |
+| `new_recipient` | `Address` | Must differ from the stream's `sender` (`SelfStream`) and from the current `recipient` (`RepeatedTransfer`). Any other address is accepted; there is no on-chain KYC or allow-list check. |
+
+**Authorization.** The stream's **sender** must authorise the call
+(`sender.require_auth()`). As of the #1637 hardening, the current recipient
+cannot call this entry point directly — recipient-initiated reassignment is the
+separate `delegate_transfer_recipient` path, gated on a recipient-issued
+`TRANSFER_RECIPIENT` grant. A missing or wrong signature surfaces as a host
+authentication failure, not a typed `Error` (there is no `Unauthorized` return
+from this function).
 
 **Errors.**
 
@@ -668,6 +701,20 @@ cliff_time:  1610323200 (2021-01-11 00:00:00 UTC)
 At day 9: vested = 900 USDC, but withdrawable = 0 (pre-cliff).  
 At day 11: vested = 1,100 USDC, withdrawable = 1,100 USDC (cliff passed, all accrued funds unlocked).  
 At day 100: vested = 10,000 USDC, withdrawable = 10,000 USDC (fully matured).
+| `StreamNotFound` | 1 | No readable entry for `stream_id`: the id was never issued, or its entry has been archived. Raised by `load_stream` before any other check. |
+| `NotTransferable` | 10 | The stream was created with `transferable == false`. |
+| `StreamTerminated` | 14 | The stream is `Depleted`, or `withdrawn >= deposited` (covers a sticky `Cancelled` stream whose residual has already been fully drawn). |
+| `SelfStream` | 6 | `new_recipient` equals the stream's `sender`. |
+| `RepeatedTransfer` | 30 | `new_recipient` equals the current `recipient` (no-op transfers are rejected). |
+
+This list was cross-checked against `FluxoraStream::transfer_recipient` in
+[`contracts/stream/src/lib.rs`](../contracts/stream/src/lib.rs); the five
+variants above are the complete set it can return. `Unauthorized` (7) is **not**
+reachable here — auth failures abort in the host before a typed error is
+produced.
+
+**Events.** Exactly one `recipient_transferred` event on success: topics
+`stream_id`, `old_recipient`, and `new_recipient`; empty payload.
 
 ### Views — read-only, no TTL side effects
 
