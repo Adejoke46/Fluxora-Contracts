@@ -159,5 +159,5 @@ pub enum Error {
     TokenAmountMismatch = 32,
     // --- Monotonicity ---
     /// An operation would cause the vested amount to decrease.
-    VestedDecreased = 32,
+    VestedDecreased = 33,
 }
