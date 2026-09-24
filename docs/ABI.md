@@ -270,6 +270,7 @@ accounting.
 | `cancel(stream_id)` | sender | — |
 | `pause(stream_id)` / `resume(stream_id)` | sender | — |
 | `transfer_recipient(stream_id, new_recipient)` | recipient | — |
+| `revoke_delegate(stream_id, grantor, delegate)` | sender or recipient | — |
 
 `withdraw` with `amount = None` draws the full available balance.
 
@@ -310,6 +311,28 @@ Paused streams may be topped up: `Paused` is not terminal. Matured streams
 (accrual clock already at `end_time`) and terminal streams (`Cancelled` /
 `Depleted`) cannot. On success the sender's token balance is transferred into
 the contract via a SEP-41 `transfer`.
+#### `revoke_delegate(stream_id, grantor, delegate)` — revoke a delegate grant immediately
+
+`revoke_delegate` removes the delegate grant stored for the pair
+`(stream_id, delegate)`, if one exists. Revocation is **immediate and
+unconditional**: from the next ledger onward the grant is gone, so a delegate
+whose only grant was this one loses access to the stream and its next call fails
+with `DelegateNotPermitted` (27). It does **not** unwind anything the delegate
+already did — funds moved while the grant was live (for example by
+`delegate_withdraw`) stay moved, and `deposited`, `withdrawn` and `status` are
+untouched by the revocation itself. No token sub-invocation is made and no
+balances change; this call is pure storage plus one event.
+
+`revoke_delegate` is **idempotent**. Revoking a grant that does not exist —
+never issued, already revoked, or revoked by the counterparty — is a successful
+no-op that still performs the removal and still emits `delegate_revoked`. There
+is no "grant not found" error, and a client does not need to read the grant
+before revoking it.
+
+Either the stream's `sender` or its `recipient` may revoke, and either party may
+revoke a grant the **other** party issued: the grant key is per
+`(stream_id, delegate)`, not per issuer. The delegate cannot revoke its own
+grant, and an address that is neither party cannot revoke at all.
 
 **Parameters.**
 
@@ -327,6 +350,15 @@ key.
 (`sender.require_auth()`). The recipient cannot top up, and there is no admin
 key. A missing or wrong signature surfaces as a host authentication failure,
 not a typed `Error`.
+| `stream_id` | `u64` | An id of an existing, readable stream. Ids are monotonic and run `0..stream_count()`, so any issued id is accepted syntactically; a value that was never issued, or whose entry has been archived, fails with `StreamNotFound`. |
+| `grantor` | `Address` | Any address equal to the stream's `sender` or `recipient`. Any other address fails with `Unauthorized`. The address must also authorise the call (`grantor.require_auth()`); it is the signing party, not a delegate acting under a grant. |
+| `delegate` | `Address` | Any `Address`, used as the grant key to remove. It need not currently hold a grant: a missing grant is a successful no-op, so the full address space is accepted. |
+
+**Authorization.** The `grantor` must be the stream's `sender` or `recipient`,
+and must sign (`grantor.require_auth()`). The delegate neither consents nor can
+block the revocation, and there is no admin key. The party check runs before the
+auth check, so an address that is neither party returns `Unauthorized` whether
+or not it signed.
 
 **Errors.**
 
@@ -531,6 +563,17 @@ payload `amount` (this payout), `withdrawn` (cumulative after the call),
 the deposit on a non-cancelled stream). The token contract also emits its own
 `transfer` event for the payout. No event is emitted on failure.
 
+| `Unauthorized` | 7 | `grantor` is neither the stream's `sender` nor its `recipient`. |
+
+`DelegateNotPermitted` (27) and `DelegateExpired` (28) are **not** returned by
+`revoke_delegate` — they are raised when a delegate *uses* a grant. Revoking an
+expired, non-permitted, or non-existent grant all succeed. This list was
+cross-checked against `FluxoraStream::revoke_delegate` in
+[`contracts/stream/src/lib.rs`](../contracts/stream/src/lib.rs); the two
+variants above are the complete set it can return.
+
+**Events.** Exactly one `delegate_revoked` event on success, including the
+idempotent no-op case: topics `stream_id`, `grantor`, `delegate`; no payload.
 
 ### Views — read-only, no TTL side effects
 
@@ -675,6 +718,7 @@ is the snake_case event name, second is always `stream_id`.
 | `resumed` | `stream_id`, `sender` | `paused_duration`, `paused_total` |
 | `topped_up` | `stream_id`, `sender` | `amount`, `deposited`, `end_time` |
 | `recipient_transferred` | `stream_id`, `old_recipient`, `new_recipient` | — |
+| `delegate_revoked` | `stream_id`, `grantor`, `delegate` | — |
 | `ttl_extended` | `stream_id` | `extended_to_ledgers` |
 
 Every payload carries enough state to reconstruct the stream without replaying
