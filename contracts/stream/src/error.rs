@@ -157,4 +157,7 @@ pub enum Error {
     /// what happens when an assumption cannot be checked at call time (a
     /// rebasing token).
     TokenAmountMismatch = 32,
+    // --- Monotonicity ---
+    /// An operation would cause the vested amount to decrease.
+    VestedDecreased = 32,
 }

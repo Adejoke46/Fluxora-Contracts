@@ -456,13 +456,18 @@ impl FluxoraStream {
             return Err(Error::DepositRateTooLow);
         }
 
+        let old_vested = accrual::vested(&stream, now)?;
+        stream.deposited = new_deposited;
+        stream.end_time = new_end;
+        if accrual::vested(&stream, now)? < old_vested {
+            return Err(Error::VestedDecreased);
+        }
+
         let token = stream.token.clone();
         let sender = stream.sender.clone();
 
         pull_deposit(&env, &token, &sender, &amount)?;
 
-        stream.deposited = new_deposited;
-        stream.end_time = new_end;
         storage::save_stream(&env, stream_id, &stream);
 
         events::topped_up(&env, stream_id, &stream, amount);
@@ -707,8 +712,15 @@ impl FluxoraStream {
         }
 
         let now = env.ledger().timestamp();
+        let old_vested = accrual::vested(&stream, now)?;
+
         stream.paused_at = Some(now);
         stream.status = StreamStatus::Paused;
+
+        if accrual::vested(&stream, now)? < old_vested {
+            return Err(Error::VestedDecreased);
+        }
+
         storage::save_stream(&env, stream_id, &stream);
 
         events::paused(&env, stream_id, &stream, now);
@@ -733,6 +745,8 @@ impl FluxoraStream {
         }
 
         let now = env.ledger().timestamp();
+        let old_vested = accrual::vested(&stream, now)?;
+
         let paused_duration = now.saturating_sub(paused_at);
         stream.paused_total = stream
             .paused_total
@@ -740,6 +754,11 @@ impl FluxoraStream {
             .ok_or(Error::Overflow)?;
         stream.paused_at = None;
         stream.status = StreamStatus::Active;
+
+        if accrual::vested(&stream, now)? < old_vested {
+            return Err(Error::VestedDecreased);
+        }
+
         storage::save_stream(&env, stream_id, &stream);
 
         events::resumed(&env, stream_id, &stream, paused_duration);
@@ -790,7 +809,15 @@ impl FluxoraStream {
             return Err(Error::RepeatedTransfer);
         }
 
+        let now = env.ledger().timestamp();
+        let old_vested = accrual::vested(&stream, now)?;
+
         stream.recipient = new_recipient.clone();
+
+        if accrual::vested(&stream, now)? < old_vested {
+            return Err(Error::VestedDecreased);
+        }
+
         storage::save_stream(&env, stream_id, &stream);
 
         events::recipient_transferred(&env, stream_id, &old_recipient, &new_recipient);
