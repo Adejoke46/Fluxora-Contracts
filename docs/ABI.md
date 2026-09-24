@@ -264,7 +264,7 @@ accounting.
 | `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable)` | sender | `u64` stream id |
 | `top_up(stream_id, amount)` | sender | — |
 | `withdraw(stream_id, amount: Option<i128>)` | recipient | `i128` paid |
-| `batch_withdraw(recipient, stream_ids: Vec<u64>)` | recipient | `i128` total |
+| `batch_withdraw(recipient, stream_ids: Vec<u64>)` | recipient | `i128` total — [details](#batch_withdraw) |
 | `cancel(stream_id)` | sender | — |
 | `pause(stream_id)` / `resume(stream_id)` | sender | — |
 | `transfer_recipient(stream_id, new_recipient)` | recipient | — |
@@ -318,6 +318,90 @@ variants above are the complete set it can return.
 **Events.** Exactly one `resumed` event on success: topics `stream_id` and
 `sender`; payload `paused_duration` (seconds absorbed by this call, i.e. the
 elapsed pause) and `paused_total` (cumulative paused seconds after the call).
+### `batch_withdraw`
+
+```rust
+fn batch_withdraw(env: Env, recipient: Address, stream_ids: Vec<u64>) -> Result<i128, Error>
+```
+
+Drains the full currently-withdrawable balance of several streams in one call
+and returns the total paid out, in the token's smallest unit (`i128`, a string
+over JSON-RPC). Unlike `withdraw` there is **no `amount` parameter**: every
+element is drained to its current balance. Use `withdrawable_of(id)` for a
+single stream's figure.
+
+#### Parameters
+
+| parameter | type | valid range / constraints |
+|---|---|---|
+| `recipient` | `Address` | The account that authorises the call and receives every payout. It is compared **by value** against each `Stream.recipient`; the batch is rejected with `Unauthorized` (7) unless all of them match. A failed signature surfaces as a host authentication failure, not a typed `Error`. |
+| `stream_ids` | `Vec<u64>` | **1 to `MAX_BATCH_SIZE` (16) elements**, inclusive. Every element must decode as a `u64` (`MalformedStreamId` otherwise) and name a distinct existing stream in `0..stream_count()` (`StreamNotFound` otherwise). Empty → `EmptyBatch`; more than 16 → `BatchTooLarge`; a repeated id → `DuplicateStreamId`. |
+
+`MAX_BATCH_SIZE` is 16 because the binding mainnet constraint is the **contract
+event budget**, not entry or instruction counts — see the derivation in the
+[README](../README.md). Chunk larger id lists client-side; the SDK does this
+automatically.
+
+#### Authorisation
+
+`recipient.require_auth()` — the recipient authorises **once** for the whole
+batch. The sender, and any other party, cannot call it. Because a stream's
+recipient is immutable except through `transfer_recipient`, an authorisation
+captured for one recipient cannot be replayed against another.
+
+#### Per-element behaviour
+
+1. The batch is *resolved and validated in full* before any storage write or
+   token call.
+2. A stream whose withdrawable balance is currently **zero** is **skipped**, not
+   rejected: its TTL is extended on the touch and nothing else happens. This
+   covers pre-start/pre-cliff streams, fully drawn streams, a drained
+   `Cancelled` stream, and a `Depleted` stream. `NothingToWithdraw` (17) and
+   `StreamTerminated` (14) are therefore **never returned by
+   `batch_withdraw`** — that distinction lives in `withdraw` alone.
+3. Streams need not share a token; each non-zero payout uses its own stream's
+   token.
+4. The returned total is the sum of every element's withdrawable amount,
+   including the zero-valued elements. Per-stream amounts exist only in the
+   events.
+
+#### Atomicity
+
+All-or-nothing. Any error aborts the entire call, discarding payouts already
+applied to earlier elements: no accounting is written, no tokens move, and no
+event is observable. Duplicate rejection is deterministic and independent of
+where the repeats sit, so a corrected retry always behaves the same way.
+
+#### Events
+
+* One `withdrawn` event **per stream that paid out**, in batch order, with
+  topics `stream_id`, `recipient` and payload `amount`, `withdrawn`,
+  `deposited`, `status`.
+* Skipped (zero-balance) streams emit **nothing**, so a 16-element batch may
+  emit fewer than 16 events.
+* There is no aggregate or batch-level event; the return value is the only
+  total.
+* Each non-zero payout also triggers the token contract's own `transfer` event.
+
+#### Failure modes
+
+Cross-checked against `batch_withdraw`'s implementation and the shared helpers
+it calls (`validate_batch_ids`, `reject_duplicate_ids`, `accrual::withdrawable`,
+`apply_withdrawal` → `token_transfer`). No other discriminant is reachable.
+
+| error | # | condition |
+|---|---|---|
+| `StreamNotFound` | 1 | An id in `stream_ids` does not exist, or has been archived out of the live ledger (see `stream_exists`). |
+| `Unauthorized` | 7 | A resolved stream's `recipient` differs from the `recipient` argument. |
+| `BatchTooLarge` | 19 | `stream_ids.len() > MAX_BATCH_SIZE` (16). |
+| `EmptyBatch` | 20 | `stream_ids` contains no elements. |
+| `DuplicateStreamId` | 21 | The same id appears more than once in the batch. |
+| `Overflow` | 22 | Checked arithmetic overflows while accruing a stream's balance or summing the batch total. |
+| `TokenTransferFailed` | 25 | A payout's token transfer was rejected by the token contract (pool underfunded, or the token's own authorisation rules refused the call). The raw token discriminant is discarded — see the `Error` table above. |
+| `TokenMissing` | 26 | A payout's token address does not resolve to a deployed contract (host `Abort`). No funds moved. |
+| `MalformedStreamId` | 29 | A serialized element of `stream_ids` does not decode as a `u64`. |
+
+`StreamNotActive` (11) is reserved and is not returned here.
 
 ### Views — read-only, no TTL side effects
 
