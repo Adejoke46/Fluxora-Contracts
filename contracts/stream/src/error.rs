@@ -139,4 +139,8 @@ pub enum Error {
     // --- Arithmetic (top-up) ---
     /// Zero or negative `top_up` amount.
     InvalidTopUp = 31,
+
+    // --- Monotonicity ---
+    /// An operation would cause the vested amount to decrease.
+    VestedDecreased = 32,
 }
