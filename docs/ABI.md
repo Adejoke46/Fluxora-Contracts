@@ -290,6 +290,24 @@ timestamp that has not advanced — or has gone backwards relative to `paused_at
 is already `Active` returns `StreamNotPaused`, not a no-op success. A
 non-pausable stream can never satisfy the precondition either, because `pause`
 is the only transition into `Paused`.
+#### `top_up(stream_id, amount)` — extend duration, keep the rate
+
+`top_up` adds funds to a live stream without changing the per-second rate the
+recipient agreed to at creation. `end_time` moves forward by
+`floor(amount * duration / deposited)` seconds so the added tokens stream out
+at the original pace; `deposited` increases by `amount`. The alternative —
+hold `end_time` and raise the rate — is rejected because it would retroactively
+re-vest elapsed time.
+
+The duration extension always rounds **down**. Rounding up would lower the rate
+and reduce already-vested amounts; rounding down guarantees `vested` never
+decreases across a top-up (residual at most one second of schedule, in the
+recipient's favour).
+
+Paused streams may be topped up: `Paused` is not terminal. Matured streams
+(accrual clock already at `end_time`) and terminal streams (`Cancelled` /
+`Depleted`) cannot. On success the sender's token balance is transferred into
+the contract via a SEP-41 `transfer`.
 
 **Parameters.**
 
@@ -300,6 +318,13 @@ is the only transition into `Paused`.
 **Authorization.** The stream's `sender` must authorise the call
 (`sender.require_auth()`). The recipient cannot resume, and there is no admin
 key.
+| `stream_id` | `u64` | Id of an existing, non-terminal stream whose accrual clock has not yet reached `end_time`. Ids run `0..stream_count()`; an id that was never issued, or whose entry has been archived, fails with `StreamNotFound`. |
+| `amount` | `i128` | Strictly positive (`> 0`), in the stream token's smallest unit. Must be large enough that `floor(amount * duration / deposited) >= 1` (otherwise `TopUpTooSmall`). Must also leave `new_deposited >= new_duration` after the extension (`DepositRateTooLow`). |
+
+**Authorization.** The stream's `sender` must authorise the call
+(`sender.require_auth()`). The recipient cannot top up, and there is no admin
+key. A missing or wrong signature surfaces as a host authentication failure,
+not a typed `Error`.
 
 **Errors.**
 
@@ -402,6 +427,26 @@ it calls (`validate_batch_ids`, `reject_duplicate_ids`, `accrual::withdrawable`,
 | `MalformedStreamId` | 29 | A serialized element of `stream_ids` does not decode as a `u64`. |
 
 `StreamNotActive` (11) is reserved and is not returned here.
+| `StreamNotFound` | 1 | No readable entry for `stream_id`: the id was never issued, or its entry has been archived. Raised by `load_stream` before any other check. |
+| `DepositRateTooLow` | 5 | After applying the extension, `new_deposited < new_duration` (same creation-time guard re-checked against the new figures). |
+| `StreamTerminated` | 14 | The stream is `Cancelled` or `Depleted`. Checked before amount/maturity tests. |
+| `StreamMatured` | 15 | Accrual clock (`stream_time`) has already reached `end_time`. Extending a matured stream would make the new funds instantly (or near-instantly) withdrawable; create a new stream instead. |
+| `InvalidAmount` | 18 | `amount <= 0`. |
+| `Overflow` | 22 | Checked arithmetic overflow while computing `delta`, `new_deposited`, `new_end`, `new_duration`, or the creation-time product guard; or `delta` outside `0..=u64::MAX`. |
+| `TopUpTooSmall` | 23 | `floor(amount * duration / deposited) == 0` — the top-up cannot buy even one second of schedule, so absorbing it would require raising the rate. |
+| `TokenTransferFailed` | 25 | The token contract returned a typed error on the deposit transfer (insufficient sender balance, trustline, or token auth rules). |
+| `TokenMissing` | 26 | The stream's token address has no deployed code (host Abort / trap). |
+
+This list was cross-checked against `FluxoraStream::top_up` in
+[`contracts/stream/src/lib.rs`](../contracts/stream/src/lib.rs) and the shared
+`token_transfer` helper; the nine variants above are the complete set it can
+return. `Unauthorized` (7) is **not** reachable here — auth failures abort in
+the host before a typed error is produced.
+
+**Events.** Exactly one `topped_up` event on success: topics `stream_id` and
+`sender`; payload `amount` (this top-up), `deposited` (total after the call),
+and `end_time` (extended schedule end). The token contract also emits its own
+`transfer` event for the deposit.
 
 ### Views — read-only, no TTL side effects
 
