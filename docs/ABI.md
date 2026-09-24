@@ -269,6 +269,54 @@ accounting.
 
 `withdraw` with `amount = None` draws the full available balance.
 
+#### `resume(stream_id)` — un-pause and fold the paused interval into `paused_total`
+
+`resume` reverses `pause`: it clears `paused_at`, moves the stream back to
+`Active`, and adds the elapsed pause (`now - paused_at`) to `paused_total`. The
+stored schedule — `start_time`, `end_time`, `cliff_time` — is **not** touched.
+Because accrual is driven by `elapsed - paused_total`, the larger `paused_total`
+shifts the effective end of the stream forward by exactly the time it spent
+paused, so the clock picks up where it stopped and the total value delivered
+over the stream's life is unchanged.
+
+No value moves: `resume` performs no token sub-invocation and does not change
+`deposited`, `withdrawn`, or any balance. It is a pure clock operation.
+
+`paused_duration` is computed with a saturating subtraction, so a ledger
+timestamp that has not advanced — or has gone backwards relative to `paused_at`
+— yields `0` rather than an error. `resume` is **not** idempotent: a stream that
+is already `Active` returns `StreamNotPaused`, not a no-op success. A
+non-pausable stream can never satisfy the precondition either, because `pause`
+is the only transition into `Paused`.
+
+**Parameters.**
+
+| parameter | type | valid range |
+|---|---|---|
+| `stream_id` | `u64` | An id of an existing, non-terminal stream whose `status` is `Paused`. Ids are monotonic and run `0..stream_count()`, so any issued id is accepted syntactically; a `stream_id` that was never issued, or whose entry has been archived, fails with `StreamNotFound`. |
+
+**Authorization.** The stream's `sender` must authorise the call
+(`sender.require_auth()`). The recipient cannot resume, and there is no admin
+key.
+
+**Errors.**
+
+| variant | # | condition |
+|---|---|---|
+| `StreamNotFound` | 1 | No readable entry for `stream_id`: the id was never issued, or its entry has been archived. |
+| `StreamNotPaused` | 12 | The stream is not currently paused — `paused_at` is `None`, or `status` is `Active` (never paused, or already resumed). |
+| `StreamTerminated` | 14 | The stream is `Cancelled` or `Depleted`. Checked before the paused-state test, so a terminal stream that still carries a `paused_at` reports `StreamTerminated`, not `StreamNotPaused`. |
+| `Overflow` | 22 | Defensive only: `paused_total + paused_duration` does not fit in `u64`. Unreachable for any stream created through the contract. Listed only so an integrator is never surprised by it. |
+
+`NotPausable` (9) is a `pause`-only failure and is never returned by `resume`.
+This list was cross-checked against `FluxoraStream::resume` in
+[`contracts/stream/src/lib.rs`](../contracts/stream/src/lib.rs); the four
+variants above are the complete set it can return.
+
+**Events.** Exactly one `resumed` event on success: topics `stream_id` and
+`sender`; payload `paused_duration` (seconds absorbed by this call, i.e. the
+elapsed pause) and `paused_total` (cumulative paused seconds after the call).
+
 ### Views — read-only, no TTL side effects
 
 | function | returns |
