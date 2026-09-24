@@ -176,6 +176,79 @@ equivalent.
 this automatically. See [README](../README.md) for why the cap is 16 and why it
 is derived from the *event* budget rather than the entry count.
 
+### Delegation
+
+`grant_delegate` and `revoke_delegate` manage scoped, expiring permissions for a
+third party; the `delegate_*` entry points exercise a grant.
+
+| function | auth | returns |
+|---|---|---|
+| `grant_delegate(stream_id, grantor, delegate, ops, expires_at)` | sender or recipient, depending on `ops` | — |
+| `revoke_delegate(stream_id, grantor, delegate)` | sender or recipient | — |
+| `delegate_withdraw(stream_id, delegate, amount: Option<i128>)` | delegate holding `op::WITHDRAW` | `i128` paid |
+| `delegate_cancel(stream_id, delegate)` | delegate holding `op::CANCEL` | — |
+| `delegate_pause(stream_id, delegate)` | delegate holding `op::PAUSE` | — |
+| `delegate_resume(stream_id, delegate)` | delegate holding `op::RESUME` | — |
+| `delegate_top_up(stream_id, delegate, amount)` | delegate holding `op::TOP_UP` | — |
+| `delegate_transfer_recipient(stream_id, delegate, new_recipient)` | delegate holding `op::TRANSFER_RECIPIENT` | — |
+
+A grant is stored under `(stream_id, delegate)` and covers one stream only. The
+delegate entry points verify it before acting: a missing grant or one that does
+not cover the requested operation returns `DelegateNotPermitted` (27), and a
+grant whose `expires_at` has passed returns `DelegateExpired` (28).
+
+#### `grant_delegate`
+
+Grant a delegate permission to call a scoped set of operations on one stream.
+Granting over an existing grant for the same `(stream_id, delegate)` pair
+replaces it entirely.
+
+```rust
+fn grant_delegate(
+    stream_id: u64,
+    grantor: Address,
+    delegate: Address,
+    ops: u32,
+    expires_at: Option<u64>,
+) -> Result<(), Error>
+```
+
+**Parameters**
+
+| parameter | type | valid range | notes |
+|---|---|---|---|
+| `stream_id` | `u64` | must reference an existing, non-terminal stream | `StreamNotFound` (1) if no such stream; `StreamTerminated` (14) if the stream is `Cancelled` or `Depleted`. |
+| `grantor` | `Address` | `stream.sender` for sender-side ops, `stream.recipient` for recipient-side ops | The party the grant is issued by; `require_auth()` runs on it, so the call must be authorised by that address. |
+| `delegate` | `Address` | any account or contract address | The party that may later call the `delegate_*` entry points. Not authenticated at grant time. |
+| `ops` | `u32` | bitmask of the `op::*` constants: `WITHDRAW` `1`, `CANCEL` `2`, `PAUSE` `4`, `RESUME` `8`, `TOP_UP` `16`, `TRANSFER_RECIPIENT` `32` | Bits 0–5 are defined; higher bits are reserved and never match at authorisation time. OR several constants together for a multi-op grant. `ops == 0` is a no-op: it returns `Ok(())` and stores nothing. |
+| `expires_at` | `Option<u64>` | `None` = never expires; `Some(t)` = Unix seconds | The grant is valid while `ledger.timestamp() <= t`. A timestamp already in the past is accepted and produces an immediately-expired grant. |
+
+**Authorisation**
+
+Sender-side ops are `CANCEL`, `PAUSE`, `RESUME` and `TOP_UP`; recipient-side ops
+are `WITHDRAW` and `TRANSFER_RECIPIENT`. A purely sender-side set must come from
+the stream's sender and a purely recipient-side set from the stream's recipient,
+each authorising the call. A set that mixes the two groups — for example
+`WITHDRAW | CANCEL` — is rejected with `Unauthorized` (7); issue two grants
+instead. `ops == 0` is a no-op and needs no authorisation.
+
+**Errors**
+
+| # | error | condition |
+|---|---|---|
+| 1 | `StreamNotFound` | No stream exists with `stream_id`. |
+| 14 | `StreamTerminated` | The stream is `Cancelled` or `Depleted`; terminal streams accept no new grants. |
+| 7 | `Unauthorized` | `ops` mixes sender-side and recipient-side bits, or `grantor` is not the party that owns the requested ops. |
+
+A failed `require_auth()` is a host authorisation trap rather than a typed
+contract error, so it is not listed above.
+
+**Events**
+
+On success — that is, whenever a non-empty `ops` mask is stored — emits
+`delegate_granted` with topics `stream_id`, `grantor`, `delegate` and payload
+`ops`, `expires_at`. `ops == 0` stores nothing and emits nothing.
+
 ---
 
 ## Events
@@ -193,6 +266,8 @@ is the snake_case event name, second is always `stream_id`.
 | `topped_up` | `stream_id`, `sender` | `amount`, `deposited`, `end_time` |
 | `recipient_transferred` | `stream_id`, `old_recipient`, `new_recipient` | — |
 | `ttl_extended` | `stream_id` | `extended_to_ledgers` |
+| `delegate_granted` | `stream_id`, `grantor`, `delegate` | `ops`, `expires_at` |
+| `delegate_revoked` | `stream_id`, `grantor`, `delegate` | — |
 
 Every payload carries enough state to reconstruct the stream without replaying
 from genesis. Field order and topic placement are ABI.
