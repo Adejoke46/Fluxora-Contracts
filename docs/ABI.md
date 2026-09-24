@@ -154,6 +154,26 @@ equivalent.
 
 `withdraw` with `amount = None` draws the full available balance.
 
+#### `cancel(stream_id)`
+
+Stops accrual and refunds the unvested remainder to the sender. The recipient keeps everything vested up to the current ledger timestamp.
+
+**Authorisation:** `sender`
+
+**Parameters:**
+* `stream_id` (`u64`): The ID of the stream to cancel. Valid range: an existing stream ID (`0..stream_count()`).
+
+**Errors:**
+* `StreamNotFound` (1): No stream exists with the given `stream_id`.
+* `NotCancellable` (8): The stream was created with `cancellable = false`.
+* `StreamTerminated` (14): The stream is already in the `Cancelled` or `Depleted` state.
+* `Overflow` (22): Integer overflow occurred during the unvested remainder computation.
+* `TokenTransferFailed` (25): The token contract refused the refund transfer.
+* `TokenMissing` (26): The token contract does not exist.
+
+**Events:**
+* `cancelled` — Emitted on success.
+
 ### Views — read-only, no TTL side effects
 
 | function | returns |
