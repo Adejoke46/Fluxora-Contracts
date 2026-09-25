@@ -45,9 +45,9 @@ mod top_up;
 mod transfer;
 
 // Stage 3
+mod accounting_identity;
 mod accrual_overflow;
 mod batch;
-mod accounting_identity;
 mod invariants;
 mod lifecycle_proptest;
 mod monotonicity;

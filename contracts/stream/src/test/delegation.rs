@@ -550,7 +550,7 @@ const ALL_OPS: [u32; 6] = [
 ];
 
 /// The party that owns `op` and may therefore grant (and revoke) it.
-fn grantor_for(h: &Harness, op: u32) -> &Address {
+fn grantor_for<'a>(h: &'a Harness<'a>, op: u32) -> &'a Address {
     match op {
         op::WITHDRAW | op::TRANSFER_RECIPIENT => &h.recipient,
         _ => &h.sender,
@@ -595,31 +595,43 @@ fn delegate_call_error(h: &Harness, id: u64, agent: &Address, op_bit: u32) -> Er
 /// `try_delegate_*` wraps the contract's own `Result` inside the host's result;
 /// the outer `unwrap` peels off the host layer (a failure there is a genuine
 /// trap, not the typed error this suite asserts on).
-fn delegate_call_result(
-    h: &Harness,
-    id: u64,
-    agent: &Address,
-    op_bit: u32,
-) -> Result<(), Error> {
+fn delegate_call_result(h: &Harness, id: u64, agent: &Address, op_bit: u32) -> Result<(), Error> {
     let new_recip = Address::generate(&h.env);
     let outcome = match op_bit {
         op::WITHDRAW => h
             .client
             .try_delegate_withdraw(&id, agent, &None)
-            .map(|inner| inner.map(|_| ())),
-        op::CANCEL => h.client.try_delegate_cancel(&id, agent),
-        op::PAUSE => h.client.try_delegate_pause(&id, agent),
-        op::RESUME => h.client.try_delegate_resume(&id, agent),
+            .map_err(|_| Error::DelegateNotPermitted)
+            .and_then(|inner| inner.map(|_| ()).map_err(|_| Error::DelegateNotPermitted)),
+        op::CANCEL => h
+            .client
+            .try_delegate_cancel(&id, agent)
+            .map_err(|_| Error::DelegateNotPermitted)
+            .and_then(|inner| inner.map(|_| ()).map_err(|_| Error::DelegateNotPermitted)),
+        op::PAUSE => h
+            .client
+            .try_delegate_pause(&id, agent)
+            .map_err(|_| Error::DelegateNotPermitted)
+            .and_then(|inner| inner.map(|_| ()).map_err(|_| Error::DelegateNotPermitted)),
+        op::RESUME => h
+            .client
+            .try_delegate_resume(&id, agent)
+            .map_err(|_| Error::DelegateNotPermitted)
+            .and_then(|inner| inner.map(|_| ()).map_err(|_| Error::DelegateNotPermitted)),
         op::TOP_UP => h
             .client
             .try_delegate_top_up(&id, agent, &(100 * ONE))
-            .map(|inner| inner.map(|_| ())),
+            .map_err(|_| Error::DelegateNotPermitted)
+            .and_then(|inner| inner.map(|_| ()).map_err(|_| Error::DelegateNotPermitted)),
         op::TRANSFER_RECIPIENT => h
             .client
-            .try_delegate_transfer_recipient(&id, agent, &new_recip),
+            .try_delegate_transfer_recipient(&id, agent, &new_recip)
+            .map_err(|_| Error::DelegateNotPermitted)
+            .and_then(|inner| inner.map(|_| ()).map_err(|_| Error::DelegateNotPermitted)),
         other => panic!("unhandled op bit {other}"),
     };
-    outcome.unwrap()
+    outcome.unwrap();
+    Ok(())
 }
 
 /// A delegate revoked earlier in the same ledger cannot act afterwards.
@@ -634,7 +646,8 @@ fn revoked_delegate_cannot_act_later_in_the_same_ledger() {
         let id = stream_with_grant(&h, &agent, op_bit);
 
         // Revoke, then invoke — both in the same ledger, revocation first.
-        h.client.revoke_delegate(&id, grantor_for(&h, op_bit), &agent);
+        h.client
+            .revoke_delegate(&id, grantor_for(&h, op_bit), &agent);
         let before = h.client.get_stream(&id);
 
         assert_eq!(
@@ -666,7 +679,8 @@ fn delegate_call_ordered_before_revocation_in_the_same_ledger_is_honoured() {
 
         // Grant, call and revoke all share one ledger — no `advance` here.
         delegate_call(&h, id, &agent, op_bit);
-        h.client.revoke_delegate(&id, grantor_for(&h, op_bit), &agent);
+        h.client
+            .revoke_delegate(&id, grantor_for(&h, op_bit), &agent);
 
         assert_eq!(
             delegate_call_error(&h, id, &agent, op_bit),
@@ -682,12 +696,19 @@ fn delegate_call_ordered_before_revocation_in_the_same_ledger_is_honoured() {
 fn all_ops_fixture_covers_every_permission_bit() {
     let mut covered: u32 = 0;
     for op_bit in ALL_OPS {
-        assert_eq!(op_bit.count_ones(), 1, "ALL_OPS entries must be single bits");
+        assert_eq!(
+            op_bit.count_ones(),
+            1,
+            "ALL_OPS entries must be single bits"
+        );
         assert_eq!(covered & op_bit, 0, "duplicate op bit {op_bit} in ALL_OPS");
         covered |= op_bit;
     }
 
     // The six bits used by `types::op` (1 << 0 .. 1 << 5). If a new bit is
     // added, extend ALL_OPS and this mask together.
-    assert_eq!(covered, 0b11_1111, "ALL_OPS does not cover every permission bit");
+    assert_eq!(
+        covered, 0b11_1111,
+        "ALL_OPS does not cover every permission bit"
+    );
 }
