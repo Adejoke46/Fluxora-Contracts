@@ -4,19 +4,22 @@
 #
 # This is the credibility artifact: it proves the deployed contract behaves on a
 # real network the way the unit suite says it does. Every public function is
-# called, every assertion is checked against on-chain state, and the transcript
-# is written to script/testnet-exercise.log.
+# called, every assertion is checked against on-chain state.
+#
+# Transcript: redirect stdout to a gitignored path (e.g. script/testnet-exercise.log)
+# and publish that file as a CI artifact — never commit run output to the repo.
 #
 # Usage:
-#   script/testnet-exercise.sh [CONTRACT_ID]
+#   script/testnet-exercise.sh [CONTRACT_ID] 2>&1 | tee script/testnet-exercise.log
 #
 # Requires: stellar CLI >= 27 (must match the network protocol), and the
 # identities fluxora-alice / fluxora-bob / fluxora-deployer funded on testnet.
 #
 # What it deliberately does NOT cover: the archival restore round trip. Testnet's
 # min_persistent_ttl is 120,960 ledgers (~7 days), a network floor no contract
-# can undercut, so a genuine archival cannot be observed in a single run. See
-# script/local-archival-proof.sh and docs/KNOWN-LIMITATIONS.md §1.
+# can undercut, so a genuine archival cannot be observed in a single run. That one
+# is the archival canary's job — script/archival-canary.sh, with the recorded
+# result in docs/KNOWN-LIMITATIONS.md §1.
 
 set -euo pipefail
 

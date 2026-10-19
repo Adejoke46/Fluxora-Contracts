@@ -25,7 +25,7 @@ use soroban_sdk::{Address, Env};
 
 use super::common::*;
 use crate::accrual;
-use crate::types::{Stream, StreamStatus};
+use crate::types::{CliffMode, ReleaseCurve, Stream, StreamStatus};
 
 /// Build a stream directly so a property case costs no host invocations.
 fn stream_of(
@@ -45,12 +45,14 @@ fn stream_of(
         start_time: start,
         end_time: start + duration,
         cliff_time: start + cliff_offset,
+        cliff_mode: CliffMode::Schedule,
         cancellable: true,
         pausable: true,
         transferable: true,
         paused_at: None,
         paused_total: 0,
         status: StreamStatus::Active,
+        curve: ReleaseCurve::Linear,
     }
 }
 
@@ -248,7 +250,7 @@ fn identity_holds_across_randomized_operation_sequences() {
         let start = h.now();
         let duration = 80 * DAY + rng.below(40 * DAY);
         let cliff = start + rng.below(duration / 2 + 1);
-        let deposit = (duration as i128) * ONE;
+        let deposit = 1_000 * ONE;
         let id = h.create(deposit, start, start + duration, cliff, true, true, true);
         assert_contract_identity(&h, id, &std::format!("seed {seed} init"));
 
